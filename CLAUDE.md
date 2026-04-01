@@ -46,13 +46,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working on the 
 
 | Path | What | Branch | Merge |
 |------|------|--------|-------|
-| **A** | Edit `mobile.md` sections | `section/NN-name` | Auto (if score ≥ main) |
+| **A** | Edit `program.md` sections | `section/NN-name` | Auto (if score ≥ main) |
 | **B** | Add `specs/*.md` feature specs | `spec/feature-name` | Auto (if score ≥ main) |
-| **C** | Implement code from specs | `implement/feature-name` | **Human approval required** |
+| **C** | Implement code from specs | `implement/feature-name` | **Auto (if all criteria met)** OR Human review (edge cases) |
 
 **Your role varies by path:**
 - **Path A/B:** Help improve spec quality, run local scoring, explain failures
-- **Path C:** Write spec-compliant code, ensure hard gates pass, provide evidence, wait for human review
+- **Path C:** Write spec-compliant code, ensure hard gates pass, provide evidence
+  - **Preferred:** Spec-compliant implementation → auto-merge (max 80pt)
+  - **Exception:** Edge cases (deps, security, architecture) → human review (max 100pt)
+
+**See [workflow.md](workflow.md) for detailed contribution workflow and auto-merge criteria.**
 
 ## Development Commands
 

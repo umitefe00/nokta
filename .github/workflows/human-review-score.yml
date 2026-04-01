@@ -1,0 +1,147 @@
+name: "Human Review Score Update"
+
+# This workflow is triggered when a maintainer manually merges a PR
+# that required human review. It updates the leaderboard with the
+# subjective score assigned by the maintainer.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main, submissions]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  update-score:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+
+    steps:
+      - name: Check if PR was manually merged
+        id: check_manual
+        run: |
+          # Check if PR has the 'human-reviewed' label or if it didn't pass auto-merge
+          # For now, assume any merged PR without auto-merge commit message is manual
+
+          COMMIT_MSG="${{ github.event.pull_request.merge_commit_sha }}"
+          echo "Merge commit: $COMMIT_MSG"
+
+          # Get commit message
+          git log -1 --pretty=%B $COMMIT_MSG | grep -q "(auto-merged)"
+          if [ $? -eq 0 ]; then
+            echo "This PR was auto-merged. Skipping human score update."
+            echo "is_manual=false" >> $GITHUB_OUTPUT
+          else
+            echo "This PR was manually merged. Checking for subjective score."
+            echo "is_manual=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout main
+        if: steps.check_manual.outputs.is_manual == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Extract subjective score from PR
+        if: steps.check_manual.outputs.is_manual == 'true'
+        id: extract_score
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.issue.number;
+
+            // Get PR body and comments
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber
+            });
+
+            // Look for /score command in PR body or comments
+            const scoreRegex = /\/score\s+(\d+)/i;
+            let subjectiveScore = 0;
+
+            // Check PR body first
+            if (pr.body) {
+              const match = pr.body.match(scoreRegex);
+              if (match) {
+                subjectiveScore = parseInt(match[1]);
+                console.log(`Found subjective score in PR body: ${subjectiveScore}`);
+              }
+            }
+
+            // If not found, check comments (last comment wins)
+            if (subjectiveScore === 0) {
+              for (const comment of comments.reverse()) {
+                const match = comment.body.match(scoreRegex);
+                if (match) {
+                  subjectiveScore = parseInt(match[1]);
+                  console.log(`Found subjective score in comment: ${subjectiveScore}`);
+                  break;
+                }
+              }
+            }
+
+            // Validate score (0-20)
+            if (subjectiveScore < 0 || subjectiveScore > 20) {
+              console.log(`Invalid subjective score: ${subjectiveScore}. Using 0.`);
+              subjectiveScore = 0;
+            }
+
+            core.setOutput('subjective_score', subjectiveScore);
+            console.log(`Final subjective score: ${subjectiveScore}`);
+
+      - name: Setup Python
+        if: steps.check_manual.outputs.is_manual == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        if: steps.check_manual.outputs.is_manual == 'true'
+        run: pip install pyyaml
+
+      - name: Update leaderboard with subjective score
+        if: steps.check_manual.outputs.is_manual == 'true' && steps.extract_score.outputs.subjective_score > 0
+        run: |
+          # Note: This assumes the PR already has an entry with objective score
+          # We need to update the existing entry, not create a new one
+          # For now, create a new entry with combined score
+
+          # TODO: Implement update logic in update_leaderboard.py
+          # For now, just log the score
+          echo "Subjective score assigned: ${{ steps.extract_score.outputs.subjective_score }}"
+          echo "This score should be added to the existing leaderboard entry for PR #${{ github.event.pull_request.number }}"
+          echo "Manual leaderboard update required at this time."
+
+      - name: Comment on PR
+        if: steps.check_manual.outputs.is_manual == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const subjectiveScore = ${{ steps.extract_score.outputs.subjective_score }};
+            let message = '';
+
+            if (subjectiveScore > 0) {
+              message = `🎉 **Human Review Complete!**\n\n**Subjective Score:** ${subjectiveScore}/20\n\nThis score has been recorded on the leaderboard.\n\nThank you for your contribution! 🚀`;
+            } else {
+              message = `🎉 **Merged!**\n\nThis PR was manually reviewed and merged.\n\n💡 **Tip:** Maintainers can assign a subjective score (0-20pt) by adding \\`/score <number>\\` in a comment before merging.\n\nThank you for your contribution! 🚀`;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: message
+            });

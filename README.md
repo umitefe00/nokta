@@ -10,18 +10,20 @@
 
 ## How It Works?
 
-There are two ways to contribute:
+There are three contribution paths:
 
-### Path A — Develop a section of `mobile.md`
+### Path A — Develop a section of `program.md` (SPEC EDITING)
+
+Edit existing sections in `program.md` to improve specification quality.
 
 ```
-Pick a section
+Pick a section (see Section List below)
     ↓
 Open a branch: section/04-data-contracts
     ↓
-Write the relevant section in mobile.md
+Edit the relevant section in program.md
     ↓
-Open a PR
+Open a PR to main
     ↓
 CI scores automatically (0-100)
     ↓
@@ -31,9 +33,13 @@ Score < current score on main → ❌ Auto-reject
 Fix, push, try again
 ```
 
-**No human review. The metric decides. Score never drops.**
+**🤖 Fully automated. No human review. The metric decides. Score never drops.**
 
-### Path B — Propose a new feature spec
+**Branch naming:** `section/<number>-<description>` (e.g., `section/04-data-contracts`)
+
+### Path B — Propose a new feature spec (SPEC CREATION)
+
+Create new feature specifications as standalone documents.
 
 ```
 Copy specs/TEMPLATE.md → specs/your-feature.md
@@ -42,17 +48,76 @@ Open a branch: spec/your-feature
     ↓
 Fill in all 5 sections, delete all > TODO lines
     ↓
-Open a PR
+Open a PR to main
     ↓
 CI scores against spec_generic.yml (0-100)
     ↓
-First PR for this file → ✅ Establishes baseline on main
+First PR for this file → ✅ Establishes baseline (score ≥ 0)
 Subsequent PRs → must match or beat the baseline
     ↓
 Fix, push, try again
 ```
 
-**Same ratchet. Score never drops. First merge sets the bar.**
+**🤖 Fully automated. No human review. First merge sets the bar. Score never drops.**
+
+**Branch naming:** `spec/<feature-name>` (e.g., `spec/user-profile`)
+
+### Path C — Implement code from specs (IMPLEMENTATION)
+
+Write actual code (TypeScript, React Native) based on approved specs.
+
+```
+Read program.md or specs/*.md (approved spec)
+    ↓
+Open a branch: implement/feature-name
+    ↓
+Write code that implements the spec exactly
+    ↓
+Run hard gates locally:
+  • npx tsc --noEmit (TypeScript)
+  • npx eslint . --ext .ts,.tsx (ESLint)
+  • npm test (Jest tests)
+  • npx expo export --dump-sourcemap (Bundle size < 2MB)
+    ↓
+Open a PR to submissions branch
+    ↓
+CI runs evaluation workflow:
+  • Validates hard gates
+  • Runs golden flow tests (if available)
+  • Scores quality/effort
+  • Posts scorecard to PR
+  • Updates LEADERBOARD.md
+    ↓
+All gates pass → ✅ Eligible for human review
+Any gate fails → ❌ Fix and push again
+    ↓
+👤 HUMAN REVIEW REQUIRED (even if CI passes)
+  • Maintainer reviews code quality
+  • Security check (no API keys, XSS, injection)
+  • Architecture compliance
+  • Spec compliance
+    ↓
+Approved → 🎉 Merged to main
+```
+
+**👤 Human approval required. CI validates, but human reviews for security, architecture, and design patterns.**
+
+**Branch naming:** `implement/<feature-name>`, `fix/<bug>`, `test/<test-name>`
+
+**Evidence required:** Screenshots, screen recording, or Expo Go QR code/APK
+
+---
+
+### Summary: Which Path Should I Use?
+
+| Path | What | Automated? | Branch | Merge Target |
+|------|------|------------|--------|--------------|
+| **A** | Edit `program.md` sections | ✅ Auto-merge | `section/NN-name` | `main` |
+| **B** | Add `specs/*.md` feature specs | ✅ Auto-merge | `spec/feature-name` | `main` |
+| **C** | Implement code from specs | 👤 Human approval | `implement/feature-name` | `submissions` → `main` |
+
+**Path A/B = Spec work → Auto-merge**
+**Path C = Implementation → Human review required**
 
 ## Quick Start
 

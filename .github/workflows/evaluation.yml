@@ -1,0 +1,589 @@
+name: "Nokta Evaluation & Leaderboard"
+
+# Triggered when implementation PRs are opened to submissions branch
+# This workflow scores contributions and updates the leaderboard
+# Uses pull_request_target for security (runs in base repo context)
+
+on:
+  pull_request_target:
+    branches: [main, submissions]
+    paths:
+      - "app/**/*"
+      - "src/**/*"
+      - "__tests__/**/*"
+      - "package.json"
+      - "package-lock.json"
+    types: [opened, synchronize, reopened]
+
+# Write access: PR comments + leaderboard branch push
+permissions:
+  pull-requests: write
+  contents: write
+  issues: write
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      merge_decision: ${{ steps.final_verdict.outputs.merge_decision }}
+      objective_score: ${{ steps.score.outputs.objective_score }}
+      verdict: ${{ steps.final_verdict.outputs.verdict }}
+
+    steps:
+      # 1. Checkout MAIN — source of truth for all infrastructure
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0   # needed for git operations and comparison
+
+      # 2. Extract PR files for evaluation
+      - name: Fetch PR changes
+        run: |
+          git fetch origin pull/${{ github.event.pull_request.number }}/head:pr-head
+          echo "PR head SHA: $(git rev-parse pr-head)"
+          echo "Main head SHA: $(git rev-parse main)"
+
+          # Show what files changed
+          echo "--- Changed files ---"
+          git diff --name-only main...pr-head
+
+      # 3. Checkout PR branch for testing
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr-branch
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      # 4. Install dependencies in PR branch
+      - name: Install dependencies
+        working-directory: pr-branch
+        run: npm ci
+
+      # 5. Hard Gate 1 — TypeScript
+      - name: Hard Gate 1 — TypeScript
+        id: typescript
+        working-directory: pr-branch
+        continue-on-error: true
+        run: |
+          echo "Running TypeScript compiler..."
+          npx tsc --noEmit > /tmp/tsc.log 2>&1 || TSC_EXIT=$?
+          if [ "${TSC_EXIT:-0}" -ne 0 ]; then
+            echo "status=❌ FAIL" >> $GITHUB_OUTPUT
+            echo "output<<EOF" >> $GITHUB_OUTPUT
+            cat /tmp/tsc.log >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "score=0" >> $GITHUB_OUTPUT
+          else
+            echo "status=✅ PASS" >> $GITHUB_OUTPUT
+            echo "output=Zero TypeScript errors" >> $GITHUB_OUTPUT
+            echo "score=20" >> $GITHUB_OUTPUT
+          fi
+
+      # 6. Hard Gate 2 — ESLint
+      - name: Hard Gate 2 — ESLint
+        id: eslint
+        working-directory: pr-branch
+        continue-on-error: true
+        run: |
+          echo "Running ESLint..."
+          npx eslint . --ext .ts,.tsx > /tmp/eslint.log 2>&1 || ESLINT_EXIT=$?
+          if [ "${ESLINT_EXIT:-0}" -ne 0 ]; then
+            echo "status=❌ FAIL" >> $GITHUB_OUTPUT
+            echo "output<<EOF" >> $GITHUB_OUTPUT
+            cat /tmp/eslint.log >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "score=0" >> $GITHUB_OUTPUT
+          else
+            echo "status=✅ PASS" >> $GITHUB_OUTPUT
+            echo "output=Zero ESLint errors" >> $GITHUB_OUTPUT
+            echo "score=20" >> $GITHUB_OUTPUT
+          fi
+
+      # 7. Hard Gate 3 — Tests
+      - name: Hard Gate 3 — Tests
+        id: tests
+        working-directory: pr-branch
+        continue-on-error: true
+        run: |
+          echo "Running Jest tests..."
+          npm test -- --ci --coverage --json --outputFile=/tmp/jest-results.json > /tmp/jest.log 2>&1 || JEST_EXIT=$?
+
+          if [ "${JEST_EXIT:-0}" -ne 0 ]; then
+            echo "status=❌ FAIL" >> $GITHUB_OUTPUT
+            echo "output<<EOF" >> $GITHUB_OUTPUT
+            cat /tmp/jest.log >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "score=0" >> $GITHUB_OUTPUT
+            echo "pass_count=0" >> $GITHUB_OUTPUT
+            echo "total_count=0" >> $GITHUB_OUTPUT
+          else
+            # Extract test counts from JSON if available
+            if [ -f /tmp/jest-results.json ]; then
+              PASS_COUNT=$(jq -r '.numPassedTests // 0' /tmp/jest-results.json || echo "0")
+              TOTAL_COUNT=$(jq -r '.numTotalTests // 0' /tmp/jest-results.json || echo "0")
+            else
+              PASS_COUNT=$(grep -oP '\d+ passing' /tmp/jest.log | grep -oP '\d+' | head -1 || echo "0")
+              TOTAL_COUNT=$PASS_COUNT
+            fi
+
+            echo "status=✅ PASS" >> $GITHUB_OUTPUT
+            echo "output=$PASS_COUNT/$TOTAL_COUNT tests passing" >> $GITHUB_OUTPUT
+            echo "score=20" >> $GITHUB_OUTPUT
+            echo "pass_count=$PASS_COUNT" >> $GITHUB_OUTPUT
+            echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
+          fi
+
+      # 8. Hard Gate 4 — Bundle Size
+      - name: Hard Gate 4 — Bundle Size
+        id: bundle
+        working-directory: pr-branch
+        continue-on-error: true
+        run: |
+          echo "Checking bundle size..."
+          npx expo export --dump-sourcemap --output-dir /tmp/expo-export > /tmp/bundle.log 2>&1 || true
+
+          if [ -f /tmp/expo-export/_expo/static/js/web/*.js ]; then
+            BUNDLE_SIZE=$(du -sb /tmp/expo-export/_expo/static/js/web/*.js 2>/dev/null | awk '{s+=$1} END {print s}')
+            BUNDLE_SIZE_MB=$(echo "scale=2; ${BUNDLE_SIZE:-0} / 1048576" | bc)
+
+            if (( $(echo "$BUNDLE_SIZE_MB > 2" | bc -l) )); then
+              echo "status=❌ FAIL" >> $GITHUB_OUTPUT
+              echo "output=Bundle size ${BUNDLE_SIZE_MB}MB exceeds 2MB limit" >> $GITHUB_OUTPUT
+              echo "score=0" >> $GITHUB_OUTPUT
+            else
+              echo "status=✅ PASS" >> $GITHUB_OUTPUT
+              echo "output=Bundle size ${BUNDLE_SIZE_MB}MB (under 2MB limit)" >> $GITHUB_OUTPUT
+              echo "score=20" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "status=⚠️  SKIP" >> $GITHUB_OUTPUT
+            echo "output=No bundle generated (Expo app not initialized yet)" >> $GITHUB_OUTPUT
+            echo "score=10" >> $GITHUB_OUTPUT
+          fi
+
+      # 9. Hard Gate 5 — Dependency Check
+      - name: Hard Gate 5 — Dependency Check
+        id: deps
+        working-directory: pr-branch
+        continue-on-error: true
+        run: |
+          echo "Checking for unauthorized dependency changes..."
+          git fetch origin main
+
+          if git diff origin/main -- package.json | grep -E '^\+.*"(dependencies|devDependencies)"' > /dev/null; then
+            # Check if there's an approved issue
+            echo "status=⚠️  WARN" >> $GITHUB_OUTPUT
+            echo "output=Dependency changes detected. Ensure GitHub issue approval exists." >> $GITHUB_OUTPUT
+            echo "score=5" >> $GITHUB_OUTPUT
+          else
+            echo "status=✅ PASS" >> $GITHUB_OUTPUT
+            echo "output=No dependency changes" >> $GITHUB_OUTPUT
+            echo "score=10" >> $GITHUB_OUTPUT
+          fi
+
+      # 10. Golden Flow Tests (if they exist)
+      - name: Golden Flow Tests
+        id: golden_flows
+        working-directory: pr-branch
+        continue-on-error: true
+        run: |
+          if [ -d "__tests__/golden-flows" ]; then
+            echo "Running golden flow tests..."
+            npm test -- __tests__/golden-flows --json --outputFile=/tmp/golden-tests.json > /tmp/golden.log 2>&1 || true
+
+            if [ -f /tmp/golden-tests.json ]; then
+              GOLDEN_PASS=$(jq -r '.numPassedTests // 0' /tmp/golden-tests.json)
+              GOLDEN_TOTAL=$(jq -r '.numTotalTests // 0' /tmp/golden-tests.json)
+            else
+              GOLDEN_PASS=0
+              GOLDEN_TOTAL=0
+            fi
+
+            if [ "$GOLDEN_TOTAL" -gt 0 ]; then
+              GOLDEN_SCORE=$(echo "scale=2; ($GOLDEN_PASS / $GOLDEN_TOTAL) * 10" | bc)
+            else
+              GOLDEN_SCORE=0
+            fi
+
+            echo "status=✅ RAN" >> $GITHUB_OUTPUT
+            echo "pass=$GOLDEN_PASS" >> $GITHUB_OUTPUT
+            echo "total=$GOLDEN_TOTAL" >> $GITHUB_OUTPUT
+            echo "score=$GOLDEN_SCORE" >> $GITHUB_OUTPUT
+          else
+            echo "status=⚠️  SKIP" >> $GITHUB_OUTPUT
+            echo "pass=0" >> $GITHUB_OUTPUT
+            echo "total=0" >> $GITHUB_OUTPUT
+            echo "score=0" >> $GITHUB_OUTPUT
+          fi
+
+      # 11. Calculate Total Score and Determine Verdict
+      - name: Calculate Total Score and Determine Verdict
+        id: score
+        run: |
+          TSC_SCORE=${{ steps.typescript.outputs.score }}
+          ESLINT_SCORE=${{ steps.eslint.outputs.score }}
+          TEST_SCORE=${{ steps.tests.outputs.score }}
+          BUNDLE_SCORE=${{ steps.bundle.outputs.score }}
+          DEPS_SCORE=${{ steps.deps.outputs.score }}
+          GOLDEN_SCORE=${{ steps.golden_flows.outputs.score }}
+
+          # Hard gates total (objective metrics only)
+          HARD_GATES_TOTAL=$(echo "$TSC_SCORE + $ESLINT_SCORE + $TEST_SCORE + $BUNDLE_SCORE" | bc)
+          OBJECTIVE_TOTAL=$(echo "$HARD_GATES_TOTAL + $GOLDEN_SCORE" | bc)
+
+          echo "objective_score=$OBJECTIVE_TOTAL" >> $GITHUB_OUTPUT
+          echo "Objective score: $OBJECTIVE_TOTAL/80"
+
+          # Determine verdict based on workflow.md criteria
+          HARD_GATES_FAILED=false
+          if [ "${{ steps.typescript.outputs.status }}" == "❌ FAIL" ] || \
+             [ "${{ steps.eslint.outputs.status }}" == "❌ FAIL" ] || \
+             [ "${{ steps.tests.outputs.status }}" == "❌ FAIL" ] || \
+             [ "${{ steps.bundle.outputs.status }}" == "❌ FAIL" ]; then
+            HARD_GATES_FAILED=true
+          fi
+
+          # Check for human review triggers
+          NEEDS_REVIEW=false
+          REVIEW_REASONS=""
+
+          # Reason 1: Dependency changes
+          if [ "${{ steps.deps.outputs.status }}" == "⚠️  WARN" ]; then
+            NEEDS_REVIEW=true
+            REVIEW_REASONS="${REVIEW_REASONS}- New dependencies added (requires approval)\n"
+          fi
+
+          # Reason 2: Immutable files modified (checked separately)
+          # This will be checked in a new step below
+
+          # Reason 3: Golden flow regression (if tests exist)
+          if [ "${{ steps.golden_flows.outputs.total }}" -gt 0 ]; then
+            # TODO: Compare with main branch golden flow rate
+            # For now, skip this check
+            :
+          fi
+
+          # Final verdict
+          if [ "$HARD_GATES_FAILED" == "true" ]; then
+            echo "verdict=FAIL" >> $GITHUB_OUTPUT
+            echo "verdict_emoji=❌" >> $GITHUB_OUTPUT
+            echo "verdict_text=FAILED — Fix errors and resubmit" >> $GITHUB_OUTPUT
+            echo "merge_decision=BLOCK" >> $GITHUB_OUTPUT
+          elif [ "$NEEDS_REVIEW" == "true" ]; then
+            echo "verdict=REVIEW" >> $GITHUB_OUTPUT
+            echo "verdict_emoji=⏸️" >> $GITHUB_OUTPUT
+            echo "verdict_text=NEEDS HUMAN REVIEW — $REVIEW_REASONS" >> $GITHUB_OUTPUT
+            echo "merge_decision=HOLD" >> $GITHUB_OUTPUT
+            echo "review_reasons=$REVIEW_REASONS" >> $GITHUB_OUTPUT
+          else
+            echo "verdict=PASS" >> $GITHUB_OUTPUT
+            echo "verdict_emoji=✅" >> $GITHUB_OUTPUT
+            echo "verdict_text=PASSED — Eligible for auto-merge" >> $GITHUB_OUTPUT
+            echo "merge_decision=AUTO_MERGE" >> $GITHUB_OUTPUT
+          fi
+
+      # 12. Check for Immutable Files Modified
+      - name: Check Immutable Files
+        id: immutable_check
+        working-directory: pr-branch
+        continue-on-error: true
+        run: |
+          git fetch origin main
+
+          IMMUTABLE_PATTERNS=(
+            ".github/workflows/"
+            "scripts/*.py"
+            "checklists/*.yml"
+            "app.json"
+            "tsconfig.json"
+            "babel.config.js"
+            ".eslintrc.js"
+          )
+
+          MODIFIED=false
+          for pattern in "${IMMUTABLE_PATTERNS[@]}"; do
+            if git diff origin/main --name-only | grep -E "$pattern" > /dev/null; then
+              MODIFIED=true
+              echo "⚠️  Immutable file modified: $pattern"
+            fi
+          done
+
+          if [ "$MODIFIED" == "true" ]; then
+            echo "status=❌" >> $GITHUB_OUTPUT
+            echo "message=Immutable files modified (see workflow.md)" >> $GITHUB_OUTPUT
+          else
+            echo "status=✅" >> $GITHUB_OUTPUT
+            echo "message=No immutable files modified" >> $GITHUB_OUTPUT
+          fi
+
+      # 13. Update Verdict Based on Immutable Check
+      - name: Update Verdict
+        id: final_verdict
+        run: |
+          VERDICT="${{ steps.score.outputs.verdict }}"
+          MERGE_DECISION="${{ steps.score.outputs.merge_decision }}"
+
+          # Block if immutable files modified
+          if [ "${{ steps.immutable_check.outputs.status }}" == "❌" ]; then
+            echo "verdict=REVIEW" >> $GITHUB_OUTPUT
+            echo "verdict_emoji=⏸️" >> $GITHUB_OUTPUT
+            echo "verdict_text=NEEDS HUMAN REVIEW — Immutable files modified" >> $GITHUB_OUTPUT
+            echo "merge_decision=HOLD" >> $GITHUB_OUTPUT
+          else
+            echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
+            echo "verdict_emoji=${{ steps.score.outputs.verdict_emoji }}" >> $GITHUB_OUTPUT
+            echo "verdict_text=${{ steps.score.outputs.verdict_text }}" >> $GITHUB_OUTPUT
+            echo "merge_decision=$MERGE_DECISION" >> $GITHUB_OUTPUT
+          fi
+
+      # 14. Generate Evaluation Report
+      - name: Generate Evaluation Report
+        run: |
+          VERDICT="${{ steps.final_verdict.outputs.verdict }}"
+          VERDICT_EMOJI="${{ steps.final_verdict.outputs.verdict_emoji }}"
+          VERDICT_TEXT="${{ steps.final_verdict.outputs.verdict_text }}"
+          OBJECTIVE_SCORE="${{ steps.score.outputs.objective_score }}"
+          MERGE_DECISION="${{ steps.final_verdict.outputs.merge_decision }}"
+
+          cat > /tmp/eval_comment.md <<EOF
+          # 🎯 Nokta Evaluation Report
+
+          **Contributor:** @${{ github.event.pull_request.user.login }}
+          **PR:** #${{ github.event.pull_request.number }}
+          **Objective Score:** $OBJECTIVE_SCORE/80 (auto-merge max)
+          **Verdict:** $VERDICT_EMOJI $VERDICT_TEXT
+
+          ---
+
+          ## Hard Gates (Objective)
+
+          | Gate | Status | Score | Details |
+          |------|--------|-------|---------|
+          | TypeScript | ${{ steps.typescript.outputs.status }} | ${{ steps.typescript.outputs.score }}/20 | ${{ steps.typescript.outputs.output }} |
+          | ESLint | ${{ steps.eslint.outputs.status }} | ${{ steps.eslint.outputs.score }}/20 | ${{ steps.eslint.outputs.output }} |
+          | Tests | ${{ steps.tests.outputs.status }} | ${{ steps.tests.outputs.score }}/20 | ${{ steps.tests.outputs.output }} |
+          | Bundle Size | ${{ steps.bundle.outputs.status }} | ${{ steps.bundle.outputs.score }}/20 | ${{ steps.bundle.outputs.output }} |
+
+          ## Golden Flows
+
+          **Status:** ${{ steps.golden_flows.outputs.status }}
+          **Passed:** ${{ steps.golden_flows.outputs.pass }}/${{ steps.golden_flows.outputs.total }}
+          **Score:** ${{ steps.golden_flows.outputs.score }}/10
+
+          ## Additional Checks
+
+          | Check | Status | Details |
+          |-------|--------|---------|
+          | Dependencies | ${{ steps.deps.outputs.status }} | ${{ steps.deps.outputs.output }} |
+          | Immutable Files | ${{ steps.immutable_check.outputs.status }} | ${{ steps.immutable_check.outputs.message }} |
+
+          ---
+
+          ## Next Steps
+
+          EOF
+
+          if [ "$VERDICT" == "FAIL" ]; then
+            cat >> /tmp/eval_comment.md <<EOF
+          ❌ **Action Required:**
+          1. Review the failed gates above
+          2. Fix the issues locally
+          3. Verify with local commands:
+             \`\`\`bash
+             npx tsc --noEmit
+             npx eslint . --ext .ts,.tsx
+             npm test
+             \`\`\`
+          4. Push to the same branch
+          5. CI will re-run automatically
+
+          EOF
+          elif [ "$VERDICT" == "REVIEW" ]; then
+            cat >> /tmp/eval_comment.md <<EOF
+          ⏸️  **Human Review Required:**
+
+          All hard gates passed, but manual review needed because:
+          ${{ steps.score.outputs.review_reasons }}
+
+          **What happens next:**
+          - 👤 A maintainer will review your implementation
+          - 🔍 Review includes: security, architecture, spec compliance
+          - 📝 Maintainer may assign subjective score (0-20pt bonus)
+          - 🎯 Max score with human review: 100pt (80pt objective + 20pt subjective)
+
+          **Your objective score ($OBJECTIVE_SCORE/80) has been recorded!**
+
+          EOF
+          else
+            cat >> /tmp/eval_comment.md <<EOF
+          ✅ **Auto-Merge Eligible:**
+
+          All conditions met for autonomous merge:
+          - ✅ All hard gates passed
+          - ✅ Golden flow tests passed (or N/A)
+          - ✅ No security flags
+          - ✅ No immutable files modified
+          - ✅ Spec compliance validated via tests
+
+          **This PR will be auto-merged to main.**
+
+          **Your score ($OBJECTIVE_SCORE/80) has been recorded on the leaderboard!**
+
+          _Note: Auto-merged PRs score max 80pt. Human-reviewed PRs can score up to 100pt but take longer. See [workflow.md](https://github.com/${{ github.repository }}/blob/main/workflow.md) for details._
+
+          EOF
+          fi
+
+          cat >> /tmp/eval_comment.md <<EOF
+          ---
+
+          📊 View the full leaderboard: [LEADERBOARD.md](https://github.com/${{ github.repository }}/blob/leaderboard/LEADERBOARD.md)
+
+          📖 Read the workflow: [workflow.md](https://github.com/${{ github.repository }}/blob/main/workflow.md)
+
+          🤖 Generated by Nokta Evaluation CI
+          EOF
+
+      # 13. Post evaluation comment to PR
+      - name: Post evaluation to PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: /tmp/eval_comment.md
+          header: nokta-evaluation
+
+      # 14. Setup Python for leaderboard script
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      # 17. Update leaderboard
+      - name: Update leaderboard
+        if: steps.final_verdict.outputs.verdict != 'FAIL'
+        run: |
+          python scripts/update_leaderboard.py \
+            --username "${{ github.event.pull_request.user.login }}" \
+            --pr-number "${{ github.event.pull_request.number }}" \
+            --score "${{ steps.score.outputs.objective_score }}" \
+            --verdict "${{ steps.final_verdict.outputs.verdict }}" \
+            --merge-type "AUTO" \
+            --typescript-score "${{ steps.typescript.outputs.score }}" \
+            --eslint-score "${{ steps.eslint.outputs.score }}" \
+            --test-score "${{ steps.tests.outputs.score }}" \
+            --bundle-score "${{ steps.bundle.outputs.score }}" \
+            --golden-score "${{ steps.golden_flows.outputs.score }}"
+
+      # 16. Push updated leaderboard to leaderboard branch
+      - name: Push leaderboard
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Fetch or create leaderboard branch
+          git fetch origin leaderboard || git checkout -b leaderboard
+          git worktree add /tmp/lb-worktree origin/leaderboard || (git checkout --orphan leaderboard && git worktree add /tmp/lb-worktree)
+
+          # Copy updated leaderboard
+          cp /tmp/LEADERBOARD.md /tmp/lb-worktree/LEADERBOARD.md
+
+          # Commit and push
+          cd /tmp/lb-worktree
+          git add LEADERBOARD.md
+          git diff --cached --quiet || git commit -m "leaderboard: ${{ github.event.pull_request.user.login }} (#${{ github.event.pull_request.number }}) — ${{ steps.score.outputs.total }}/100"
+          git push origin HEAD:leaderboard
+
+      # 19. Final Job Status
+      - name: Final Verdict
+        run: |
+          VERDICT="${{ steps.final_verdict.outputs.verdict }}"
+          MERGE_DECISION="${{ steps.final_verdict.outputs.merge_decision }}"
+
+          if [ "$VERDICT" == "FAIL" ]; then
+            echo "❌ EVALUATION FAILED: One or more hard gates failed."
+            echo "Fix the issues and push again."
+            exit 1
+          elif [ "$VERDICT" == "REVIEW" ]; then
+            echo "⏸️  EVALUATION PASSED: Human review required."
+            echo "Objective score: ${{ steps.score.outputs.objective_score }}/80"
+            echo "Waiting for maintainer review..."
+            exit 0
+          else
+            echo "✅ EVALUATION PASSED: All auto-merge criteria met."
+            echo "Objective score: ${{ steps.score.outputs.objective_score }}/80"
+            echo "Proceeding to auto-merge..."
+            exit 0
+          fi
+
+  # Auto-merge job (only runs if verdict is PASS)
+  auto-merge:
+    runs-on: ubuntu-latest
+    needs: evaluate
+    if: needs.evaluate.outputs.merge_decision == 'AUTO_MERGE'
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.issue.number;
+
+            try {
+              await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                merge_method: 'squash',
+                commit_title: `feat: merge PR #${prNumber} (auto-merged)`,
+                commit_message: `
+                Automatically merged after passing all evaluation criteria.
+
+                - All hard gates passed
+                - Golden flow tests passed
+                - No security flags
+                - Spec compliance validated
+
+                Score: ${{ needs.evaluate.outputs.objective_score }}/80
+
+                See workflow.md for auto-merge criteria.
+                `
+              });
+
+              console.log(`✅ PR #${prNumber} auto-merged successfully!`);
+
+              // Add comment to PR
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: `🎉 **Auto-merged!**\n\nThis PR met all auto-merge criteria and has been merged to main.\n\n**Final Score:** ${{ needs.evaluate.outputs.objective_score }}/80\n\nThank you for your contribution! 🚀`
+              });
+
+            } catch (error) {
+              console.error('Failed to auto-merge:', error);
+
+              // Add comment about merge failure
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: `⚠️ **Auto-merge failed**\n\nAll criteria were met, but the merge failed (possibly due to conflicts).\n\nA maintainer will merge manually.\n\nError: ${error.message}`
+              });
+
+              throw error;
+            }

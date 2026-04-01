@@ -5,11 +5,46 @@
 ## Source of Truth
 
 **program.md is the single source of truth for this project.**
+**workflow.md is the single source of truth for contribution workflows.**
 
 - Before starting any task, read `program.md` in full.
 - If you encounter a contradiction between `program.md` and any other file (including this one), defer to `program.md`.
 - `program.md` defines what Nokta IS, what it does, and what it NEVER does.
 - Never implement features not explicitly described in `program.md` or approved spec files in `specs/`.
+- **workflow.md** defines HOW contributions are made, validated, scored, and merged.
+- All GitHub workflows (`.github/workflows/*.yml`) are generated based on `workflow.md`.
+
+## GitHub Workflow Generation
+
+**IMPORTANT: Workflows are generated from specs, not written directly.**
+
+When creating or modifying CI workflows:
+
+1. **Read workflow.md first** — Understand the complete contribution flow
+2. **Identify the workflow purpose** — Which path (A/B/C)? What triggers it?
+3. **Map workflow.md logic to YAML** — Translate decision tree into jobs/steps
+4. **Never modify workflows directly** — Update `workflow.md` first, then regenerate `.github/workflows/*.yml`
+5. **Test locally when possible** — Use `act` or GitHub CLI to simulate workflow execution
+
+**Example pattern:**
+
+```markdown
+workflow.md says:
+"Path C auto-merge if: all hard gates pass + no security flags + no immutable files"
+
+↓ translates to ↓
+
+.github/workflows/evaluation.yml:
+- Job: evaluate
+  - Step: Run TypeScript, ESLint, Tests, Bundle check
+  - Step: Check security flags
+  - Step: Check immutable files
+  - Step: Calculate verdict (PASS/REVIEW/FAIL)
+- Job: auto-merge (only if verdict=PASS)
+  - Step: Merge PR via GitHub API
+```
+
+**Golden rule:** If `workflow.md` is unclear or ambiguous, clarify it first before generating workflows. Workflows are code; workflow.md is the spec.
 
 ## Repository Context
 
@@ -20,11 +55,11 @@ This is **Nokta** — a mobile app that matures idea sparks (dots) into structur
 - CI enforces quality via ratcheting metrics
 - Score never drops
 
-## Two Contribution Paths
+## Three Contribution Paths
 
-Contributors can participate in two distinct ways:
+Contributors can participate in three distinct ways:
 
-### Path A & B: Spec Contributions (NO HUMAN REVIEW)
+### Path A & B: Spec Contributions (FULLY AUTOMATED)
 
 **Path A:** Edit `program.md` sections (spec writing)
 **Path B:** Add new `specs/*.md` files (feature spec writing)
@@ -47,17 +82,30 @@ spec/<feature-name>                # spec/user-profile
 - Explain which checklist items failed
 - Never modify immutable files (see program.md § 0)
 
-### Path C: Implementation Contributions (HUMAN-IN-LOOP REQUIRED)
+### Path C: Implementation Contributions (SPEC-DRIVEN AUTO-MERGE)
 
 **Path C:** Implement code based on existing specs in `program.md` or `specs/*.md`
 
-These PRs are **semi-automated** with mandatory human review:
-- CI validates implementation matches spec
-- CI runs hard gates (TypeScript, ESLint, tests, bundle size)
-- CI calculates golden flow pass rate
-- If all gates pass AND metric ≥ main → ✅ Eligible for merge
-- **HOWEVER:** Maintainer must manually review and approve before merge
-- Auto-merge is DISABLED for implementation PRs
+**Philosophy:** If implementation can be objectively validated through spec compliance and tests, it should auto-merge. Human review is the exception, not the rule.
+
+**Auto-merge criteria (PREFERRED PATH):**
+- ✅ All hard gates pass (TypeScript, ESLint, tests, bundle size < 2MB)
+- ✅ Golden flow pass rate ≥ main branch
+- ✅ No immutable files modified
+- ✅ No security flags (API keys, XSS, injection)
+- ✅ No new dependencies (or pre-approved)
+- ✅ Architecture compliance validated via tests
+
+**If ALL criteria met → 🤖 AUTO-MERGE (max score: 80pt)**
+
+**Human review required (EDGE CASES ONLY):**
+- New dependencies added
+- Security concerns detected
+- Architecture violations
+- Spec ambiguity (test coverage gaps)
+- Immutable files modified
+
+**If human review needed → ⏸️  HOLD for maintainer (max score: 100pt = 80pt objective + 20pt subjective)**
 
 **Branch naming:**
 ```
@@ -66,51 +114,61 @@ fix/<bug-description>              # fix/maturity-transition-crash
 test/<test-description>            # test/golden-flow-persistence
 ```
 
-**Why human review is required:**
-- Code architecture compliance (program.md § 11)
-- Security vulnerabilities (XSS, injection, etc.)
-- API key or secret exposure
-- Unintended side effects
-- Design pattern violations
-
 **Your role as AI agent:**
 - Write code that implements the spec exactly
 - Ensure all hard gates pass locally before PR
 - Provide evidence (screenshots, recordings, APK)
-- Explain what changed and why
-- Run golden flow tests and report results
-- Do NOT auto-merge implementation PRs — wait for human approval
+- Write tests that validate all acceptance criteria
+- Aim for auto-merge path (faster, no bottleneck)
+- If auto-merge criteria met, PR merges automatically
+- If human review needed, explain why and wait for maintainer
+
+**See [workflow.md](workflow.md) for detailed workflow and decision tree.**
 
 ## Human-in-Loop Protocol
 
-**Items requiring explicit human approval:**
+**Human review is the EXCEPTION, not the rule. Only required for:**
 
-1. **Implementation PRs** (Path C)
-   - All PRs that add/modify code in `src/`, `app/`, or test files
-   - Even if CI passes, human must approve
+1. **Edge cases that trigger REVIEW verdict** (Path C)
+   - New dependencies added → Requires GitHub issue approval first
+   - Security flags detected → XSS, injection, API keys, credentials
+   - Immutable files modified → CI pipeline, scoring, config files
+   - Architecture violations → Non-standard patterns not defined in spec
+   - Spec ambiguity → Test coverage gaps indicate unclear requirements
 
-2. **Dependency changes**
-   - Any modification to `package.json` or `package-lock.json`
-   - Requires maintainer approval via GitHub issue first
-
-3. **Immutable infrastructure changes** (program.md § 0)
+2. **Immutable infrastructure changes** (program.md § 0) — **FORBIDDEN**
    - `.github/workflows/` — CI pipeline
-   - `scripts/section_score.py` — Scoring engine
+   - `scripts/*.py` — Scoring engine
    - `checklists/*.yml` — Scoring rubrics
    - `app.json`, `tsconfig.json`, `babel.config.js`, `.eslintrc.js` — Build config
-   - These are **FORBIDDEN** to all contributors
+   - These files CANNOT be modified by contributors
 
-4. **Quarantine items** (program.md § 10)
+3. **Quarantine items** (program.md § 10)
    - Any file containing API keys or secrets
-   - Auth-related code
+   - Auth-related code (v0.1 NON-GOAL)
 
-**When you reach a decision point that requires human approval:**
-1. Stop and ask the user for guidance
-2. Present options with trade-offs
-3. Wait for explicit approval
-4. Document the decision in commit message
+**When human review is needed:**
+1. CI will mark PR with ⏸️ REVIEW verdict
+2. CI comment explains why review is needed
+3. Maintainer reviews and either:
+   - Approves and merges (may assign 0-20pt subjective score)
+   - Requests changes
+4. Final score = 80pt objective + up to 20pt subjective
 
-**Never assume user intent.** If unclear, ask.
+**When auto-merge happens:**
+1. CI validates all criteria
+2. CI marks PR with ✅ PASS verdict
+3. CI auto-merges to main
+4. Score = 80pt max (objective only)
+5. No human bottleneck
+
+**As an AI agent:**
+- Aim for auto-merge path (write spec-compliant code with full test coverage)
+- If human review needed, explain why clearly
+- Never bypass hard gates
+- Never assume approval
+
+**See [workflow.md](workflow.md) for complete decision tree.**
 
 ## Spec-Implementation Validation
 
