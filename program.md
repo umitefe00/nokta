@@ -725,3 +725,5 @@ If you are an AI agent: follow the spec exactly. Do not add features not describ
 If you are a contributor: your job is the same. Improve the score. Ship evidence. The best version wins.
 
 > "The human might be asleep. The CI never sleeps." — adapted from Karpathy's autoresearch
+
+<!-- CI Test Trigger V2 -->
