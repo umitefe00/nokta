@@ -1,7 +1,7 @@
 name: "Nokta MD Ratchet"
 
 on:
-  pull_request:
+  pull_request_target:
     paths:
       - "program.md"
     types: [opened, synchronize, reopened]
@@ -118,14 +118,17 @@ jobs:
             echo "Main score: ${{ steps.main_score.outputs.total }}"
           fi
 
-  auto-merge:
-    needs: score
-    runs-on: ubuntu-latest
-    if: success() && !github.event.pull_request.draft
-    steps:
-      - name: Enable auto-merge
-        uses: peter-evans/enable-pull-request-automerge@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          pull-request-number: ${{ github.event.pull_request.number }}
-          merge-method: squash
+  # auto-merge disabled — PRs remain open for instructor review.
+  # To re-enable: uncomment the block below.
+  #
+  # auto-merge:
+  #   needs: score
+  #   runs-on: ubuntu-latest
+  #   if: success() && !github.event.pull_request.draft
+  #   steps:
+  #     - name: Enable auto-merge
+  #       uses: peter-evans/enable-pull-request-automerge@v3
+  #       with:
+  #         token: ${{ secrets.GITHUB_TOKEN }}
+  #         pull-request-number: ${{ github.event.pull_request.number }}
+  #         merge-method: squash

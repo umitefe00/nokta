@@ -4,7 +4,7 @@ name: "Nokta Spec Ratchet"
 # program.md changes are handled by md-ratchet.yml — these are independent.
 
 on:
-  pull_request:
+  pull_request_target:
     paths:
       - "specs/**/*.md"
     types: [opened, synchronize, reopened]
@@ -122,17 +122,20 @@ jobs:
             echo "✅ PASSED: No regressions. Eligible for merge."
           fi
 
-  auto-merge:
-    needs: spec-score
-    runs-on: ubuntu-latest
-    if: success()
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - name: Enable auto-merge
-        uses: peter-evans/enable-pull-request-automerge@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          pull-request-number: ${{ github.event.pull_request.number }}
-          merge-method: squash
+  # auto-merge disabled — PRs remain open for instructor review.
+  # To re-enable: uncomment the block below.
+  #
+  # auto-merge:
+  #   needs: spec-score
+  #   runs-on: ubuntu-latest
+  #   if: success()
+  #   permissions:
+  #     contents: write
+  #     pull-requests: write
+  #   steps:
+  #     - name: Enable auto-merge
+  #       uses: peter-evans/enable-pull-request-automerge@v3
+  #       with:
+  #         token: ${{ secrets.GITHUB_TOKEN }}
+  #         pull-request-number: ${{ github.event.pull_request.number }}
+  #         merge-method: squash
