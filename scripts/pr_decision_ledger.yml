@@ -1,0 +1,11 @@
+# Nokta PR Decision Ledger
+# Format:
+# - pr_number: 123
+#   author: username
+#   confidence: 0.95
+#   decision: merge
+#   feedback: "High quality contribution..."
+#   human_override: null
+#   timestamp: "2024-04-02T..."
+
+[]
